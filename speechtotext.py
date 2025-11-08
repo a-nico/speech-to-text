@@ -13,9 +13,16 @@ import simpleaudio as sa
 import os
 from dotenv import load_dotenv
 import sys
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+
+# Record hotkey: Ctrl + Windows key
+CTRL_KEYS = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+WIN_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+
+RECORD_SECONDS = 60  # Max recording duration in seconds
+SAMPLE_RATE = 16000  # Default audio sample rate, will be adjusted if unsupported
 
 
 class Config:
@@ -105,12 +112,6 @@ def play_click(kind: str = "start") -> None:
             print(f"Error playing preloaded sound '{kind}': {e}")
     threading.Thread(target=_play, daemon=True).start()
 
-# New hotkey: Ctrl + Windows key
-CTRL_KEYS = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
-WIN_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
-
-RECORD_SECONDS = 45  # Max recording duration in seconds
-SAMPLE_RATE = 16000  # Default audio sample rate, will be adjusted if unsupported
 
 class Recorder:
     """Handles audio recording from the selected microphone device."""
@@ -235,6 +236,38 @@ class Recorder:
         with self.lock:
             self.audio = []
 
+    def refresh_devices(self) -> None:
+        """Refresh the list of available audio devices and reselect if needed."""
+        print("Refreshing audio devices...")
+
+        # Re-initialize the sounddevice library to detect hardware changes
+        sd._terminate()
+        sd._initialize()
+
+        previous_device_id = self.device_id
+        self.wasapi_devices = []
+        self.device_id = None
+        
+        self._find_wasapi_devices()
+        if self.wasapi_devices:
+            # Try to keep the same device if it still exists
+            if previous_device_id is not None:
+                device_still_exists = any(d['index'] == previous_device_id for d in self.wasapi_devices)
+                if device_still_exists:
+                    self.device_id = previous_device_id
+                    print(f"Restored previous device ID: {previous_device_id}")
+                else:
+                    print(f"Previous device (ID: {previous_device_id}) no longer available.")
+                    self._select_preferred_device()
+            else:
+                self._select_preferred_device()
+        else:
+            print("No devices found after refresh. Falling back to default device.")
+            self._fallback_to_default_device()
+        
+        if self.device_id is not None:
+            self._set_supported_sample_rate()
+
     def _record(self) -> None:
         """Internal method to handle the recording loop."""
         # Callback to collect audio chunks
@@ -251,6 +284,10 @@ class Recorder:
                     time.sleep(0.1)
         except sd.PortAudioError as e:
             print(f"Error recording audio: {e}")
+            print("This may indicate that the microphone was disconnected.")
+            self.recording = False
+        except Exception as e:
+            print(f"Unexpected error during recording: {e}")
             self.recording = False
 
     def get_wav_bytes(self) -> Optional[io.BytesIO]:
@@ -300,6 +337,39 @@ def create_icon() -> Image.Image:
         print(f"Icon load error: {e} — using default.")
         return Image.new("RGB", size, (240, 255, 0))
 
+def create_tray_menu(recorder, icon, on_refresh_mics, on_exit):
+    """Create the tray icon menu with microphone selection and other options."""
+    return pystray.Menu(
+        pystray.MenuItem("Microphones", pystray.Menu(lambda: create_mic_menu(recorder, icon))),
+        pystray.MenuItem("Refresh mics", on_refresh_mics),
+        pystray.MenuItem("Exit", on_exit)
+    )
+
+def create_mic_menu(recorder, icon) -> List[pystray.MenuItem]:
+    """Create a submenu for selecting microphones."""
+    mic_items: List[pystray.MenuItem] = []
+    for dev in recorder.wasapi_devices:
+        # Capture the device index for the handler and checked state
+        device_index: int = dev['index']
+
+        def make_handler(d_id: int) -> Callable[[], None]:
+            def handler() -> None:
+                recorder.set_device(d_id)
+                icon.update_menu()  # Update the menu to show the new checkmark
+            return handler
+
+        def make_checker(d_id: int) -> Callable[[pystray.MenuItem], bool]:
+            return lambda item: recorder.device_id == d_id
+
+        item = pystray.MenuItem(
+            dev['name'],
+            make_handler(device_index),
+            checked=make_checker(device_index),
+            radio=True
+        )
+        mic_items.append(item)
+    return mic_items
+
 def main() -> None:
     load_sounds()  # Preload sounds once at startup
 
@@ -318,7 +388,7 @@ def main() -> None:
     record_start_time = 0.0
     MIN_RECORD_DURATION = 1.0  # Minimum recording duration in seconds
 
-    def on_press(key):
+    def on_press(key: keyboard.Key) -> None:
         nonlocal combo_activated, record_start_time
         
         # Allow ESC to cancel an active recording without transcribing
@@ -349,7 +419,7 @@ def main() -> None:
                 record_start_time = time.time()
                 recorder.start()
 
-    def on_release(key):
+    def on_release(key: keyboard.Key) -> None:
         nonlocal combo_activated
         
         # Normalize left/right modifier keys
@@ -361,7 +431,7 @@ def main() -> None:
         # If a combo key is released and we were recording, stop and process.
         if key in hotkey_combo and recorder.recording:
             recorder.stop()
-            duration = time.time() - record_start_time
+            duration: float = time.time() - record_start_time
 
             # Check for minimum recording duration
             if duration < MIN_RECORD_DURATION:
@@ -398,43 +468,22 @@ def main() -> None:
     listener.start()
 
     # Run tray icon with a context menu for exit and microphone selection
-    def on_exit(icon):
+    def on_exit(icon: pystray.Icon) -> None:
         listener.stop()  # Stop the listener thread
         icon.stop()
 
-    def create_mic_menu(recorder, icon):
-        """Create a submenu for selecting microphones."""
-        mic_items = []
-        for dev in recorder.wasapi_devices:
-            # Capture the device index for the handler and checked state
-            device_index = dev['index']
-
-            def make_handler(d_id):
-                def handler():
-                    recorder.set_device(d_id)
-                    icon.update_menu()  # Update the menu to show the new checkmark
-                return handler
-
-            def make_checker(d_id):
-                return lambda item: recorder.device_id == d_id
-
-            item = pystray.MenuItem(
-                dev['name'],
-                make_handler(device_index),
-                checked=make_checker(device_index),
-                radio=True
-            )
-            mic_items.append(item)
-        return mic_items
+    def on_refresh_mics(icon: pystray.Icon) -> None:
+        """Refresh the microphone list and rebuild the menu."""
+        recorder.refresh_devices()
+        # Rebuild the entire menu so the microphone list updates correctly
+        icon.menu = create_tray_menu(recorder, icon, on_refresh_mics, on_exit)
+        icon.update_menu()
+        print("Microphone menu refreshed.")
 
     # The icon needs to be created before the menu so we can pass it to the menu creation function
     icon = pystray.Icon("SpeechToText", create_icon(), "SpeechToText")
 
-    menu = pystray.Menu(
-        pystray.MenuItem("Microphones", pystray.Menu(lambda: create_mic_menu(recorder, icon))),
-        pystray.MenuItem("Exit", on_exit)
-    )
-    icon.menu = menu
+    icon.menu = create_tray_menu(recorder, icon, on_refresh_mics, on_exit)
     icon.run()
 
 if __name__ == "__main__":

@@ -1,0 +1,10 @@
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
