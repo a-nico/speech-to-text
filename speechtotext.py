@@ -304,20 +304,40 @@ class Recorder:
         buf.seek(0)
         return buf
 
+# Global flag for echo mode
+ECHO_MODE = False
+
 def transcribe_audio(wav_bytes: io.BytesIO) -> str:
-    """Send audio data to Azure Speech-to-Text service and return transcribed text."""
+    """Send audio data to Azure Speech-to-Text service and return transcribed text.
+       When echo mode is enabled, play back the audio instead of sending it."""
+    global ECHO_MODE
     try:
-        headers = {
-            "api-key": config.azure_api_key,
-        }
-        files = {
-            "file": ("audio.wav", wav_bytes, "audio/wav"),
-        }
-        response = requests.post(config.azure_endpoint, headers=headers, files=files)
-        response.raise_for_status()
-        return response.json().get("text", "")
-    except requests.RequestException as e:
-        print(f"Transcription failed: {e}")
+        if ECHO_MODE:
+            print("ECHO MODE: Playing back recorded audio instead of sending to API.")
+            wav_bytes.seek(0)
+            try:
+                import wave
+                import simpleaudio as sa
+                with wave.open(wav_bytes, 'rb') as wf:
+                    wave_obj = sa.WaveObject(
+                        wf.readframes(wf.getnframes()),
+                        wf.getnchannels(),
+                        wf.getsampwidth(),
+                        wf.getframerate()
+                    )
+                play_obj = wave_obj.play()
+                play_obj.wait_done()
+            except Exception as e:
+                print(f"Error during playback: {e}")
+            return "[Echo mode: Audio played back locally]"
+        else:
+            headers = {"api-key": config.azure_api_key}
+            files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
+            response = requests.post(config.azure_endpoint, headers=headers, files=files)
+            response.raise_for_status()
+            return response.json().get("text", "")
+    except Exception as e:
+        print(f"Transcription/playback failed: {e}")
         return ""
 
 def copy_and_paste(text: str) -> None:
@@ -337,11 +357,25 @@ def create_icon() -> Image.Image:
         print(f"Icon load error: {e} — using default.")
         return Image.new("RGB", size, (240, 255, 0))
 
-def create_tray_menu(recorder, icon, on_refresh_mics, on_exit):
-    """Create the tray icon menu with microphone selection and other options."""
+def create_tray_menu(
+    recorder: "Recorder",
+    icon: pystray.Icon,
+    on_refresh_mics: Callable[[pystray.Icon], None],
+    on_exit: Callable[[pystray.Icon], None]
+) -> pystray.Menu:
+    """Create the tray icon menu with microphone selection, echo mode, and other options."""
+    def toggle_echo_mode(icon: pystray.Icon, item: pystray.MenuItem) -> None:
+        global ECHO_MODE
+        ECHO_MODE = not ECHO_MODE
+        print(f"Echo mode {'enabled' if ECHO_MODE else 'disabled'}.")
+
+    def echo_mode_checked(item: pystray.MenuItem) -> bool:
+        return ECHO_MODE
+
     return pystray.Menu(
         pystray.MenuItem("Microphones", pystray.Menu(lambda: create_mic_menu(recorder, icon))),
         pystray.MenuItem("Refresh mics", on_refresh_mics),
+        pystray.MenuItem("Echo mode", toggle_echo_mode, checked=echo_mode_checked),
         pystray.MenuItem("Exit", on_exit)
     )
 
