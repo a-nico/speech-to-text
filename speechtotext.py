@@ -14,8 +14,10 @@ import os
 from dotenv import load_dotenv
 import sys
 from typing import Optional, List, Dict, Any, Callable
+import ctypes
+import traceback
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Record hotkey: Ctrl + Windows key
 CTRL_KEYS = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
@@ -113,6 +115,39 @@ def play_click(kind: str = "start") -> None:
     threading.Thread(target=_play, daemon=True).start()
 
 
+def show_error_notification(title: str, message: str) -> None:
+    """Show an error message to the user via Windows message box."""
+    def _show():
+        try:
+            # Use Windows MessageBox API
+            MB_OK = 0x0
+            MB_ICONERROR = 0x10
+            MB_SYSTEMMODAL = 0x1000
+            ctypes.windll.user32.MessageBoxW(
+                0, 
+                message, 
+                title, 
+                MB_OK | MB_ICONERROR | MB_SYSTEMMODAL
+            )
+        except Exception as e:
+            print(f"Failed to show error dialog: {e}")
+    
+    # Show message box in a separate thread to not block the main thread
+    threading.Thread(target=_show, daemon=True).start()
+
+
+def safe_execute(func: Callable, error_context: str, *args, **kwargs) -> Any:
+    """Execute a function safely, catching and logging any exceptions."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        error_msg = f"{error_context}: {e}"
+        print(f"ERROR: {error_msg}")
+        print(traceback.format_exc())
+        show_error_notification("Speech-to-Text Error", error_msg)
+        return None
+
+
 class Recorder:
     """Handles audio recording from the selected microphone device."""
     def __init__(self) -> None:
@@ -122,6 +157,8 @@ class Recorder:
         self.device_id: Optional[int] = None
         self.wasapi_devices: List[Dict[str, Any]] = []
         self.sample_rate: int = SAMPLE_RATE
+        self.error_occurred: bool = False  # Track if an error occurred during recording
+        self.on_error_callback: Optional[Callable[[], None]] = None  # Callback for error recovery
         self._initialize_device()
 
     def _initialize_device(self) -> None:
@@ -217,14 +254,18 @@ class Recorder:
             self.sample_rate = SAMPLE_RATE
             print(f"No supported sample rate found. Falling back to default {SAMPLE_RATE} Hz, may not work.")
 
-    def start(self) -> None:
-        """Start recording audio in a separate thread."""
+    def start(self) -> bool:
+        """Start recording audio in a separate thread. Returns True if started successfully."""
         if self.device_id is None:
             print("Cannot start recording: No input device is selected.")
-            return
+            show_error_notification("Recording Error", "No microphone selected. Please select a microphone from the tray menu.")
+            return False
+        
         self.recording = True
         self.audio = []
-        threading.Thread(target=self._record).start()  # Start recording in a new thread
+        self.error_occurred = False
+        threading.Thread(target=self._record, daemon=True).start()
+        return True
 
     def stop(self) -> None:
         """Stop the current recording."""
@@ -235,6 +276,7 @@ class Recorder:
         self.stop()
         with self.lock:
             self.audio = []
+        self.error_occurred = False
 
     def refresh_devices(self) -> None:
         """Refresh the list of available audio devices and reselect if needed."""
@@ -271,38 +313,56 @@ class Recorder:
     def _record(self) -> None:
         """Internal method to handle the recording loop."""
         # Callback to collect audio chunks
-        def callback(indata, frames, time, status):
+        def callback(indata, frames, time_info, status):
+            if status:
+                print(f"Recording status: {status}")
             if self.recording:
                 with self.lock:
-                    # Ensure indata is a numpy array of int16
                     self.audio.append(np.array(indata, dtype='int16'))
-        # Open microphone stream and record for RECORD_SECONDS or until stopped
+        
         try:
             with sd.InputStream(samplerate=self.sample_rate, channels=1, dtype='int16', callback=callback, device=self.device_id):
                 start_time = time.time()
                 while self.recording and (time.time() - start_time < RECORD_SECONDS):
                     time.sleep(0.1)
         except sd.PortAudioError as e:
+            error_msg = f"Audio device error: {e}\nThe microphone may have been disconnected."
             print(f"Error recording audio: {e}")
             print("This may indicate that the microphone was disconnected.")
             self.recording = False
+            self.error_occurred = True
+            show_error_notification("Microphone Error", error_msg)
+            # Trigger error callback to reset state
+            if self.on_error_callback:
+                self.on_error_callback()
         except Exception as e:
+            error_msg = f"Recording failed: {e}"
             print(f"Unexpected error during recording: {e}")
+            print(traceback.format_exc())
             self.recording = False
+            self.error_occurred = True
+            show_error_notification("Recording Error", error_msg)
+            # Trigger error callback to reset state
+            if self.on_error_callback:
+                self.on_error_callback()
 
     def get_wav_bytes(self) -> Optional[io.BytesIO]:
         """Return the recorded audio as WAV bytes in a BytesIO buffer."""
         import soundfile as sf
-        with self.lock:
-            if not self.audio:
-                return None
-            # Stack audio chunks into a single numpy array
-            audio_np = np.concatenate(self.audio, axis=0)
-        buf = io.BytesIO()
-        # Write numpy array to buffer as WAV
-        sf.write(buf, audio_np, self.sample_rate, format='WAV', subtype='PCM_16')
-        buf.seek(0)
-        return buf
+        try:
+            with self.lock:
+                if not self.audio:
+                    return None
+                audio_np = np.concatenate(self.audio, axis=0)
+            buf = io.BytesIO()
+            sf.write(buf, audio_np, self.sample_rate, format='WAV', subtype='PCM_16')
+            buf.seek(0)
+            return buf
+        except Exception as e:
+            print(f"Error creating WAV bytes: {e}")
+            show_error_notification("Audio Processing Error", f"Failed to process recorded audio: {e}")
+            return None
+
 
 # Global flag for echo mode
 ECHO_MODE = False
@@ -340,10 +400,16 @@ def transcribe_audio(wav_bytes: io.BytesIO) -> str:
         print(f"Transcription/playback failed: {e}")
         return ""
 
-def copy_and_paste(text: str) -> None:
-    """Copy the given text to clipboard and simulate Ctrl+V to paste it."""
-    pyperclip.copy(text)
-    kb.press_and_release('ctrl+v')
+def copy_and_paste(text: str) -> bool:
+    """Copy the given text to clipboard and simulate Ctrl+V to paste it. Returns True on success."""
+    try:
+        pyperclip.copy(text)
+        kb.press_and_release('ctrl+v')
+        return True
+    except Exception as e:
+        print(f"Error copying/pasting text: {e}")
+        show_error_notification("Paste Error", f"Failed to paste text: {e}\n\nThe text has been copied to your clipboard.")
+        return False
 
 def create_icon() -> Image.Image:
     """Load tray icon from speaking.ico; fallback to default."""
@@ -411,91 +477,129 @@ def main() -> None:
 
     # --- Hotkey Management ---
     
-    # Using a set to track currently pressed modifier keys
+    # Use a lock to safely modify state from different threads
+    state_lock = threading.Lock()
     pressed_keys = set()
-    
-    # The combination we are looking for
     hotkey_combo = {keyboard.Key.ctrl, keyboard.Key.cmd}
-    
-    # State variables for hotkey logic
     combo_activated = False
     record_start_time = 0.0
-    MIN_RECORD_DURATION = 1.0  # Minimum recording duration in seconds
+    MIN_RECORD_DURATION = 1.0
+
+    def reset_state() -> None:
+        """Reset all state variables to recover from errors."""
+        nonlocal combo_activated
+        with state_lock:
+            combo_activated = False
+            pressed_keys.clear()
+        if recorder.recording:
+            recorder.cancel()
+        print("State reset complete - ready for next recording.")
+
+    # Register the error callback with the recorder
+    recorder.on_error_callback = reset_state
 
     def on_press(key: keyboard.Key) -> None:
         nonlocal combo_activated, record_start_time
         
-        # Allow ESC to cancel an active recording without transcribing
-        if key == keyboard.Key.esc and recorder.recording:
-            play_click("cancel")
-            print("Recording canceled.")
-            recorder.cancel()
-            combo_activated = False # Reset combo flag
-            pressed_keys.clear() # Clear all pressed keys
-            return
+        try:
+            # Allow ESC to cancel an active recording without transcribing
+            if key == keyboard.Key.esc and (recorder.recording or combo_activated):
+                safe_execute(play_click, "Playing cancel sound", "cancel")
+                print("Recording canceled.")
+                recorder.cancel()
+                with state_lock:
+                    combo_activated = False
+                    pressed_keys.clear()
+                return
 
-        # Normalize left/right modifier keys
-        if key in CTRL_KEYS:
-            key = keyboard.Key.ctrl
-        elif key in WIN_KEYS:
-            key = keyboard.Key.cmd
+            # Normalize left/right modifier keys
+            if key in CTRL_KEYS:
+                key = keyboard.Key.ctrl
+            elif key in WIN_KEYS:
+                key = keyboard.Key.cmd
 
-        if key in hotkey_combo:
-            pressed_keys.add(key)
-        
-        # If the full combo is pressed and we are not already recording, start.
-        if hotkey_combo.issubset(pressed_keys) and not recorder.recording:
-            # This check prevents re-triggering if keys are held down.
-            if not combo_activated:
-                combo_activated = True
-                play_click("start")
-                print("Recording started... (release to transcribe)")
-                record_start_time = time.time()
-                recorder.start()
+            with state_lock:
+                if key in hotkey_combo:
+                    pressed_keys.add(key)
+                
+                # If the full combo is pressed and we are not already recording, start.
+                if hotkey_combo.issubset(pressed_keys) and not recorder.recording and not combo_activated:
+                    combo_activated = True
+                    safe_execute(play_click, "Playing start sound", "start")
+                    print("Recording started... (release to transcribe)")
+                    record_start_time = time.time()
+                    if not recorder.start():
+                        # Failed to start recording, reset state
+                        combo_activated = False
+                        pressed_keys.clear()
+        except Exception as e:
+            print(f"Error in on_press handler: {e}")
+            print(traceback.format_exc())
+            reset_state()
 
     def on_release(key: keyboard.Key) -> None:
         nonlocal combo_activated
         
-        # Normalize left/right modifier keys
-        if key in CTRL_KEYS:
-            key = keyboard.Key.ctrl
-        elif key in WIN_KEYS:
-            key = keyboard.Key.cmd
+        try:
+            # Normalize left/right modifier keys
+            if key in CTRL_KEYS:
+                key = keyboard.Key.ctrl
+            elif key in WIN_KEYS:
+                key = keyboard.Key.cmd
             
-        # If a combo key is released and we were recording, stop and process.
-        if key in hotkey_combo and recorder.recording:
-            recorder.stop()
-            duration: float = time.time() - record_start_time
-
-            # Check for minimum recording duration
-            if duration < MIN_RECORD_DURATION:
-                play_click("cancel")
-                print(f"Recording too short ({duration:.2f}s). Canceled.")
-            else:
-                play_click("stop")
-                print("Recording stopped.")
+            with state_lock:
+                # Check if we were in a recording session (combo was activated)
+                was_combo_active = combo_activated
+                is_combo_key = key in hotkey_combo
                 
-                wav_bytes = recorder.get_wav_bytes()
-                if wav_bytes:
-                    print("Transcribing...")
-                    try:
-                        text = transcribe_audio(wav_bytes)
-                        if text:
-                            print("Transcribed:", text)
-                            copy_and_paste(text)
-                        else:
-                            print("Transcription returned no text.")
-                    except Exception as e:
-                        print("Error during transcription or pasting:", e)
+            # If a combo key is released and we were in a recording session
+            if is_combo_key and was_combo_active:
+                recorder.stop()
+                duration: float = time.time() - record_start_time
 
-            # Reset state for the next recording.
-            # Crucially, clear all keys to prevent the bug where one key remains "pressed".
-            pressed_keys.clear()
-            combo_activated = False
-        
-        # Also remove the key from the set if it's released outside of a recording action
-        elif key in pressed_keys:
-            pressed_keys.remove(key)
+                # Check if an error occurred during recording
+                if recorder.error_occurred:
+                    print("Recording had an error, skipping transcription.")
+                    with state_lock:
+                        pressed_keys.clear()
+                        combo_activated = False
+                    return
+
+                # Check for minimum recording duration
+                if duration < MIN_RECORD_DURATION:
+                    safe_execute(play_click, "Playing cancel sound", "cancel")
+                    print(f"Recording too short ({duration:.2f}s). Canceled.")
+                else:
+                    safe_execute(play_click, "Playing stop sound", "stop")
+                    print("Recording stopped.")
+                    
+                    wav_bytes = recorder.get_wav_bytes()
+                    if wav_bytes:
+                        print("Transcribing...")
+                        try:
+                            text = transcribe_audio(wav_bytes)
+                            if text:
+                                print("Transcribed:", text)
+                                copy_and_paste(text)
+                            else:
+                                print("Transcription returned no text.")
+                        except Exception as e:
+                            print(f"Error during transcription or pasting: {e}")
+                            show_error_notification("Transcription Error", f"Failed to transcribe audio: {e}")
+
+                # Reset state for the next recording
+                with state_lock:
+                    pressed_keys.clear()
+                    combo_activated = False
+            
+            elif key in hotkey_combo:
+                with state_lock:
+                    pressed_keys.discard(key)
+                
+        except Exception as e:
+            print(f"Error in on_release handler: {e}")
+            print(traceback.format_exc())
+            reset_state()
 
     # Start global hotkey listener
     listener = keyboard.Listener(on_press=on_press, on_release=on_release)
