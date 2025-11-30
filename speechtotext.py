@@ -49,7 +49,8 @@ class Config:
         self.sound_files = {
             "start": "start.wav",
             "stop": "stop.wav",
-            "cancel": "cancel.wav"
+            "cancel": "cancel.wav",
+            "send": "send.wav"
         }
         
         self.icon_path = self.get_path("speaking.ico")
@@ -136,10 +137,32 @@ class TextToSpeechService:
         else:
             print(f"Invalid voice '{voice}'. Available voices: {self.available_voices}")
     
-    def get_clipboard_text(self) -> Optional[str]:
-        """Get the current text from clipboard."""
+    def get_clipboard_text(self, copy_selection: bool = False) -> Optional[str]:
+        """Get the current text from clipboard.
+        
+        Args:
+            copy_selection: If True, simulate Ctrl+C first to copy any selected text.
+        """
         try:
-            text = pyperclip.paste()
+            if copy_selection:
+                # Save current clipboard content
+                original_clipboard = pyperclip.paste()
+                
+                # Simulate Ctrl+C to copy selected text
+                kb.press_and_release('ctrl+c')
+                
+                # Small delay to allow clipboard to update
+                time.sleep(0.15)
+                
+                text = pyperclip.paste()
+                
+                # If clipboard didn't change (nothing was selected), restore original
+                if text == original_clipboard:
+                    print("No text was selected, using existing clipboard content.")
+                
+            else:
+                text = pyperclip.paste()
+            
             if text and text.strip():
                 return text.strip()
             return None
@@ -180,11 +203,13 @@ class TextToSpeechService:
             return response.content
             
         except requests.exceptions.Timeout:
-            print("TTS request timed out.")
-            show_error_notification("TTS Error", "Request timed out. Please try again.")
+            print("TTS request timed out after 30 seconds.")
+            play_click("cancel")
+            show_error_notification("TTS Error", "Request timed out after 30 seconds. Please try again.")
             return None
         except requests.exceptions.RequestException as e:
             print(f"TTS request failed: {e}")
+            play_click("cancel")
             show_error_notification("TTS Error", f"Failed to synthesize speech: {e}")
             return None
     
@@ -253,12 +278,16 @@ class TextToSpeechService:
         
         threading.Thread(target=_play, daemon=True).start()
     
-    def speak_clipboard(self) -> None:
-        """Get text from clipboard and speak it."""
-        text = self.get_clipboard_text()
+    def speak_clipboard(self, copy_selection: bool = True) -> None:
+        """Get text from clipboard and speak it.
+        
+        Args:
+            copy_selection: If True, simulate Ctrl+C first to copy any selected text.
+        """
+        text = self.get_clipboard_text(copy_selection=copy_selection)
         if not text:
             print("No text in clipboard to speak.")
-            show_error_notification("TTS Error", "No text found in clipboard. Please copy some text first.")
+            show_error_notification("TTS Error", "No text found in clipboard. Please select or copy some text first.")
             return
         
         print(f"Speaking clipboard text: {text[:50]}..." if len(text) > 50 else f"Speaking: {text}")
@@ -846,7 +875,7 @@ def main() -> None:
             
             # Handle TTS hotkey release (Alt + Win)
             if is_tts_combo_key and was_tts_combo_active:
-                safe_execute(play_click, "Playing stop sound", "stop")
+                safe_execute(play_click, "Playing send sound", "send")
                 print("TTS hotkey released - speaking clipboard text...")
                 
                 # Trigger TTS in a separate thread to not block the listener
