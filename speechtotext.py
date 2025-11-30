@@ -17,11 +17,12 @@ from typing import Optional, List, Dict, Any, Callable
 import ctypes
 import traceback
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # Record hotkey: Ctrl + Windows key
 CTRL_KEYS = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
 WIN_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+ALT_KEYS = {keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr}
 
 RECORD_SECONDS = 60  # Max recording duration in seconds
 SAMPLE_RATE = 16000  # Default audio sample rate, will be adjusted if unsupported
@@ -29,12 +30,21 @@ SAMPLE_RATE = 16000  # Default audio sample rate, will be adjusted if unsupporte
 
 class Config:
     """Manages application configuration, paths, and credentials."""
+    
+    # Available TTS voices
+    TTS_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse"]
+    
     def __init__(self):
         self.base_path = self._get_base_path()
         self._load_dotenv()
         
-        self.azure_endpoint = os.getenv("AZURE_ENDPOINT")
-        self.azure_api_key = os.getenv("AZURE_API_KEY")
+        # Speech-to-Text (STT) configuration
+        self.azure_stt_endpoint = os.getenv("AZURE_STT_ENDPOINT")
+        self.azure_stt_api_key = os.getenv("AZURE_STT_API_KEY")
+
+        # Text-to-Speech (TTS) configuration
+        self.azure_tts_endpoint = os.getenv("AZURE_TTS_ENDPOINT")
+        self.azure_tts_api_key = os.getenv("AZURE_TTS_API_KEY")
         
         self.sound_files = {
             "start": "start.wav",
@@ -79,12 +89,174 @@ class Config:
 
     def _print_config_status(self) -> None:
         """Print the status of the Azure configuration."""
-        if not self.azure_endpoint or not self.azure_api_key:
-            print('Azure Speech configuration incomplete. Check environment variables.')
+        if not self.azure_stt_endpoint or not self.azure_stt_api_key:
+            print("Azure STT configuration incomplete. Check AZURE_STT_ENDPOINT / AZURE_STT_API_KEY.")
         else:
-            print('Azure Speech configuration loaded successfully')
+            print("Azure STT configuration loaded successfully")
+
+        if not self.azure_tts_endpoint or not self.azure_tts_api_key:
+            print("Azure TTS configuration incomplete. Check AZURE_TTS_ENDPOINT / AZURE_TTS_API_KEY.")
+        else:
+            print("Azure TTS configuration loaded successfully")
 
 config = Config()
+
+
+class TextToSpeechService:
+    """Handles text-to-speech conversion using Azure OpenAI TTS API."""
+    
+    def __init__(self, config: Config):
+        self.config = config
+        self.current_voice: str = "alloy"
+        self._is_playing: bool = False
+        self._play_lock = threading.Lock()
+    
+    @property
+    def available_voices(self) -> List[str]:
+        """Return list of available TTS voices."""
+        return Config.TTS_VOICES
+    
+    def set_voice(self, voice: str) -> None:
+        """Set the current TTS voice."""
+        if voice in self.available_voices:
+            self.current_voice = voice
+            print(f"TTS voice set to: {voice}")
+        else:
+            print(f"Invalid voice '{voice}'. Available voices: {self.available_voices}")
+    
+    def get_clipboard_text(self) -> Optional[str]:
+        """Get the current text from clipboard."""
+        try:
+            text = pyperclip.paste()
+            if text and text.strip():
+                return text.strip()
+            return None
+        except Exception as e:
+            print(f"Error reading clipboard: {e}")
+            return None
+    
+    def synthesize_speech(self, text: str) -> Optional[bytes]:
+        """Send text to Azure OpenAI TTS API and return audio bytes."""
+        if not self.config.azure_tts_api_key or not self.config.azure_tts_endpoint:
+            print("Azure TTS not configured.")
+            show_error_notification("TTS Error", "Azure TTS not configured. Please set AZURE_TTS_ENDPOINT and AZURE_TTS_API_KEY.")
+            return None
+        
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.azure_tts_api_key}"
+            }
+            
+            payload = {
+                "model": "tts-hd",
+                "input": text,
+                "voice": self.current_voice
+            }
+            
+            print(f"Sending TTS request with voice '{self.current_voice}'...")
+            response = requests.post(
+                self.config.azure_tts_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            print(f"TTS response received: {len(response.content)} bytes")
+            return response.content
+            
+        except requests.exceptions.Timeout:
+            print("TTS request timed out.")
+            show_error_notification("TTS Error", "Request timed out. Please try again.")
+            return None
+        except requests.exceptions.RequestException as e:
+            print(f"TTS request failed: {e}")
+            show_error_notification("TTS Error", f"Failed to synthesize speech: {e}")
+            return None
+    
+    def play_audio(self, audio_data: bytes) -> None:
+        """Play audio data using simpleaudio."""
+        with self._play_lock:
+            if self._is_playing:
+                print("Audio is already playing, skipping...")
+                return
+            self._is_playing = True
+        
+        def _play():
+            try:
+                # The API returns MP3 by default, we need to convert it
+                # Try to play as WAV first, if that fails try MP3
+                try:
+                    # Try playing as WAV
+                    audio_io = io.BytesIO(audio_data)
+                    import wave
+                    with wave.open(audio_io, 'rb') as wf:
+                        wave_obj = sa.WaveObject(
+                            wf.readframes(wf.getnframes()),
+                            wf.getnchannels(),
+                            wf.getsampwidth(),
+                            wf.getframerate()
+                        )
+                    play_obj = wave_obj.play()
+                    play_obj.wait_done()
+                except Exception:
+                    # If WAV fails, the audio is likely MP3
+                    # Use soundfile to convert
+                    import soundfile as sf
+                    audio_io = io.BytesIO(audio_data)
+                    data, samplerate = sf.read(audio_io)
+                    
+                    # Convert to int16 for simpleaudio
+                    if data.dtype != np.int16:
+                        # Normalize and convert to int16
+                        if data.max() <= 1.0 and data.min() >= -1.0:
+                            data = (data * 32767).astype(np.int16)
+                        else:
+                            data = data.astype(np.int16)
+                    
+                    # Handle mono/stereo
+                    if len(data.shape) == 1:
+                        num_channels = 1
+                    else:
+                        num_channels = data.shape[1]
+                    
+                    wave_obj = sa.WaveObject(
+                        data.tobytes(),
+                        num_channels,
+                        2,  # bytes per sample for int16
+                        samplerate
+                    )
+                    play_obj = wave_obj.play()
+                    play_obj.wait_done()
+                    
+            except Exception as e:
+                print(f"Error playing TTS audio: {e}")
+                print(traceback.format_exc())
+                show_error_notification("TTS Playback Error", f"Failed to play audio: {e}")
+            finally:
+                with self._play_lock:
+                    self._is_playing = False
+        
+        threading.Thread(target=_play, daemon=True).start()
+    
+    def speak_clipboard(self) -> None:
+        """Get text from clipboard and speak it."""
+        text = self.get_clipboard_text()
+        if not text:
+            print("No text in clipboard to speak.")
+            show_error_notification("TTS Error", "No text found in clipboard. Please copy some text first.")
+            return
+        
+        print(f"Speaking clipboard text: {text[:50]}..." if len(text) > 50 else f"Speaking: {text}")
+        
+        audio_data = self.synthesize_speech(text)
+        if audio_data:
+            self.play_audio(audio_data)
+
+
+# Global TTS service instance (initialized after config)
+tts_service: Optional[TextToSpeechService] = None
 
 # Cache for preloaded WaveObjects
 SOUND_WAVES = {}
@@ -399,9 +571,17 @@ def transcribe_audio(wav_bytes: io.BytesIO) -> str:
                 print(f"Error during playback: {e}")
             return "[Echo mode: Audio played back locally]"
         else:
-            headers = {"api-key": config.azure_api_key}
+            if not config.azure_stt_api_key or not config.azure_stt_endpoint:
+                print("Azure STT not configured.")
+                show_error_notification(
+                    "STT Error",
+                    "Azure STT not configured. Please set AZURE_STT_ENDPOINT and AZURE_STT_API_KEY.",
+                )
+                return ""
+
+            headers = {"api-key": config.azure_stt_api_key}
             files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-            response = requests.post(config.azure_endpoint, headers=headers, files=files)
+            response = requests.post(config.azure_stt_endpoint, headers=headers, files=files)
             response.raise_for_status()
             return response.json().get("text", "")
     except Exception as e:
@@ -437,7 +617,7 @@ def create_tray_menu(
     on_refresh_mics: Callable[[pystray.Icon], None],
     on_exit: Callable[[pystray.Icon], None]
 ) -> pystray.Menu:
-    """Create the tray icon menu with microphone selection, echo mode, and other options."""
+    """Create the tray icon menu with microphone selection, TTS voice selection, echo mode, and other options."""
     def toggle_echo_mode(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         global ECHO_MODE
         ECHO_MODE = not ECHO_MODE
@@ -448,6 +628,7 @@ def create_tray_menu(
 
     return pystray.Menu(
         pystray.MenuItem("Microphones", pystray.Menu(lambda: create_mic_menu(recorder, icon))),
+        pystray.MenuItem("TTS Voice", pystray.Menu(lambda: create_voice_menu(icon))),
         pystray.MenuItem("Refresh mics", on_refresh_mics),
         pystray.MenuItem("Echo mode", toggle_echo_mode, checked=echo_mode_checked),
         pystray.MenuItem("Exit", on_exit)
@@ -478,26 +659,61 @@ def create_mic_menu(recorder, icon) -> List[pystray.MenuItem]:
         mic_items.append(item)
     return mic_items
 
+
+def create_voice_menu(icon) -> List[pystray.MenuItem]:
+    """Create a submenu for selecting TTS voices."""
+    global tts_service
+    voice_items: List[pystray.MenuItem] = []
+    
+    if tts_service is None:
+        return [pystray.MenuItem("TTS not initialized", lambda: None, enabled=False)]
+    
+    for voice in tts_service.available_voices:
+        def make_handler(v: str) -> Callable[[], None]:
+            def handler() -> None:
+                tts_service.set_voice(v)
+                icon.update_menu()
+            return handler
+        
+        def make_checker(v: str) -> Callable[[pystray.MenuItem], bool]:
+            return lambda item, voice=v: tts_service.current_voice == voice
+        
+        item = pystray.MenuItem(
+            voice.capitalize(),
+            make_handler(voice),
+            checked=make_checker(voice),
+            radio=True
+        )
+        voice_items.append(item)
+    
+    return voice_items
+
 def main() -> None:
+    global tts_service
+    
     load_sounds()  # Preload sounds once at startup
 
     recorder = Recorder()
+    tts_service = TextToSpeechService(config)
 
     # --- Hotkey Management ---
     
     # Use a lock to safely modify state from different threads
     state_lock = threading.Lock()
     pressed_keys = set()
-    hotkey_combo = {keyboard.Key.ctrl, keyboard.Key.cmd}
+    hotkey_combo = {keyboard.Key.ctrl, keyboard.Key.cmd}  # Ctrl + Win for speech-to-text
+    tts_hotkey_combo = {keyboard.Key.alt, keyboard.Key.cmd}  # Alt + Win for text-to-speech
     combo_activated = False
+    tts_combo_activated = False
     record_start_time = 0.0
     MIN_RECORD_DURATION = 1.0
 
     def reset_state() -> None:
         """Reset all state variables to recover from errors."""
-        nonlocal combo_activated
+        nonlocal combo_activated, tts_combo_activated
         with state_lock:
             combo_activated = False
+            tts_combo_activated = False
             pressed_keys.clear()
         if recorder.recording:
             recorder.cancel()
@@ -507,7 +723,7 @@ def main() -> None:
     recorder.on_error_callback = reset_state
 
     def on_press(key: keyboard.Key) -> None:
-        nonlocal combo_activated, record_start_time
+        nonlocal combo_activated, tts_combo_activated, record_start_time
         
         try:
             # Allow ESC to cancel an active recording without transcribing
@@ -521,17 +737,29 @@ def main() -> None:
                 return
 
             # Normalize left/right modifier keys
+            normalized_key = key
             if key in CTRL_KEYS:
-                key = keyboard.Key.ctrl
+                normalized_key = keyboard.Key.ctrl
             elif key in WIN_KEYS:
-                key = keyboard.Key.cmd
+                normalized_key = keyboard.Key.cmd
+            elif key in ALT_KEYS:
+                normalized_key = keyboard.Key.alt
 
             with state_lock:
-                if key in hotkey_combo:
-                    pressed_keys.add(key)
+                if normalized_key in (keyboard.Key.ctrl, keyboard.Key.cmd, keyboard.Key.alt):
+                    pressed_keys.add(normalized_key)
                 
-                # If the full combo is pressed and we are not already recording, start.
-                if hotkey_combo.issubset(pressed_keys) and not recorder.recording and not combo_activated:
+                # Check for TTS hotkey (Alt + Win) - must check before recording hotkey
+                if tts_hotkey_combo.issubset(pressed_keys) and not tts_combo_activated and not combo_activated:
+                    # Don't activate TTS if Ctrl is also pressed (to avoid conflict with Ctrl+Win)
+                    if keyboard.Key.ctrl not in pressed_keys:
+                        tts_combo_activated = True
+                        safe_execute(play_click, "Playing start sound", "start")
+                        print("TTS hotkey activated - will speak clipboard text on release...")
+                        return
+                
+                # Check for recording hotkey (Ctrl + Win)
+                if hotkey_combo.issubset(pressed_keys) and not recorder.recording and not combo_activated and not tts_combo_activated:
                     combo_activated = True
                     safe_execute(play_click, "Playing start sound", "start")
                     print("Recording started... (release to transcribe)")
@@ -546,21 +774,47 @@ def main() -> None:
             reset_state()
 
     def on_release(key: keyboard.Key) -> None:
-        nonlocal combo_activated
+        nonlocal combo_activated, tts_combo_activated
         
         try:
             # Normalize left/right modifier keys
+            normalized_key = key
             if key in CTRL_KEYS:
-                key = keyboard.Key.ctrl
+                normalized_key = keyboard.Key.ctrl
             elif key in WIN_KEYS:
-                key = keyboard.Key.cmd
+                normalized_key = keyboard.Key.cmd
+            elif key in ALT_KEYS:
+                normalized_key = keyboard.Key.alt
             
             with state_lock:
+                # Check if we were in a TTS session (Alt + Win combo was activated)
+                was_tts_combo_active = tts_combo_activated
                 # Check if we were in a recording session (combo was activated)
                 was_combo_active = combo_activated
-                is_combo_key = key in hotkey_combo
+                is_combo_key = normalized_key in hotkey_combo
+                is_tts_combo_key = normalized_key in tts_hotkey_combo
+            
+            # Handle TTS hotkey release (Alt + Win)
+            if is_tts_combo_key and was_tts_combo_active:
+                safe_execute(play_click, "Playing stop sound", "stop")
+                print("TTS hotkey released - speaking clipboard text...")
                 
-            # If a combo key is released and we were in a recording session
+                # Trigger TTS in a separate thread to not block the listener
+                def do_tts():
+                    try:
+                        tts_service.speak_clipboard()
+                    except Exception as e:
+                        print(f"TTS error: {e}")
+                        print(traceback.format_exc())
+                
+                threading.Thread(target=do_tts, daemon=True).start()
+                
+                with state_lock:
+                    pressed_keys.clear()
+                    tts_combo_activated = False
+                return
+            
+            # Handle recording hotkey release (Ctrl + Win)
             if is_combo_key and was_combo_active:
                 recorder.stop()
                 duration: float = time.time() - record_start_time
@@ -600,9 +854,9 @@ def main() -> None:
                     pressed_keys.clear()
                     combo_activated = False
             
-            elif key in hotkey_combo:
+            elif normalized_key in (keyboard.Key.ctrl, keyboard.Key.cmd, keyboard.Key.alt):
                 with state_lock:
-                    pressed_keys.discard(key)
+                    pressed_keys.discard(normalized_key)
                 
         except Exception as e:
             print(f"Error in on_release handler: {e}")
