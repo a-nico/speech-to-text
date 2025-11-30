@@ -22,6 +22,8 @@ SpeechToText is a Python application that records audio from a microphone and tr
    # Text-to-Speech (TTS)
    AZURE_TTS_ENDPOINT=your_text_to_speech_endpoint
    AZURE_TTS_API_KEY=your_text_to_speech_api_key
+   # Optional: default TTS speed (0.25–4.0, defaults to 1.0 if unset/invalid)
+   AZURE_TTS_SPEED_DEFAULT=1.30
    ```
 
 3. **Provide Sound Files**:

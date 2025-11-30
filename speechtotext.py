@@ -108,6 +108,18 @@ class TextToSpeechService:
     def __init__(self, config: Config):
         self.config = config
         self.current_voice: str = "alloy"
+        # Default playback/generation speed (can be overridden via env)
+        try:
+            env_speed = os.getenv("AZURE_TTS_SPEED_DEFAULT")
+            if env_speed is not None:
+                value = float(env_speed)
+                # Clamp to OpenAI's allowed range 0.25–4.0
+                self.speed = max(0.25, min(4.0, value))
+            else:
+                self.speed = 1.0
+        except ValueError:
+            print("Invalid AZURE_TTS_SPEED_DEFAULT value; falling back to 1.0")
+            self.speed = 1.0
         self._is_playing: bool = False
         self._play_lock = threading.Lock()
     
@@ -151,10 +163,11 @@ class TextToSpeechService:
             payload = {
                 "model": "tts-hd",
                 "input": text,
-                "voice": self.current_voice
+                "voice": self.current_voice,
+                "speed": self.speed,
             }
             
-            print(f"Sending TTS request with voice '{self.current_voice}'...")
+            print(f"Sending TTS request with voice '{self.current_voice}' at speed {self.speed}...")
             response = requests.post(
                 self.config.azure_tts_endpoint,
                 headers=headers,
@@ -617,7 +630,7 @@ def create_tray_menu(
     on_refresh_mics: Callable[[pystray.Icon], None],
     on_exit: Callable[[pystray.Icon], None]
 ) -> pystray.Menu:
-    """Create the tray icon menu with microphone selection, TTS voice selection, echo mode, and other options."""
+    """Create the tray icon menu with microphone selection, TTS voice/speed selection, echo mode, and other options."""
     def toggle_echo_mode(icon: pystray.Icon, item: pystray.MenuItem) -> None:
         global ECHO_MODE
         ECHO_MODE = not ECHO_MODE
@@ -629,6 +642,7 @@ def create_tray_menu(
     return pystray.Menu(
         pystray.MenuItem("Microphones", pystray.Menu(lambda: create_mic_menu(recorder, icon))),
         pystray.MenuItem("TTS Voice", pystray.Menu(lambda: create_voice_menu(icon))),
+        pystray.MenuItem("TTS Speed", pystray.Menu(lambda: create_speed_menu(icon))),
         pystray.MenuItem("Refresh mics", on_refresh_mics),
         pystray.MenuItem("Echo mode", toggle_echo_mode, checked=echo_mode_checked),
         pystray.MenuItem("Exit", on_exit)
@@ -687,6 +701,42 @@ def create_voice_menu(icon) -> List[pystray.MenuItem]:
         voice_items.append(item)
     
     return voice_items
+
+
+def create_speed_menu(icon) -> List[pystray.MenuItem]:
+    """Create a submenu for selecting TTS playback/generation speed."""
+    global tts_service
+
+    speed_items: List[pystray.MenuItem] = []
+
+    if tts_service is None:
+        return [pystray.MenuItem("TTS not initialized", lambda: None, enabled=False)]
+
+    # Preset speeds (as requested): 1.0, 1.15, 1.30, 1.45, 1.6
+    preset_speeds = [1.0, 1.15, 1.30, 1.45, 1.6]
+
+    for speed in preset_speeds:
+        label = f"{speed:.2f}x".rstrip("0").rstrip(".") + "x"
+
+        def make_handler(s: float) -> Callable[[], None]:
+            def handler() -> None:
+                tts_service.speed = s
+                print(f"TTS speed set to {s}")
+                icon.update_menu()
+            return handler
+
+        def make_checker(s: float) -> Callable[[pystray.MenuItem], bool]:
+            return lambda item, value=s: abs(tts_service.speed - value) < 1e-6
+
+        item = pystray.MenuItem(
+            label,
+            make_handler(speed),
+            checked=make_checker(speed),
+            radio=True,
+        )
+        speed_items.append(item)
+
+    return speed_items
 
 def main() -> None:
     global tts_service
