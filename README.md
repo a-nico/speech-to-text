@@ -27,7 +27,7 @@ Speakr is a Python application that records audio from a microphone and transcri
    ```
 
 3. **Provide Sound Files**:
-   Add short WAV files for feedback sounds ([`start.wav`](start.wav ), [`stop.wav`](stop.wav ), [`cancel.wav`](cancel.wav )) in the same directory as the script.
+   Add short WAV files for feedback sounds ([`start.wav`](start.wav ), [`stop.wav`](stop.wav ), [`cancel.wav`](cancel.wav ), [`send.wav`](send.wav )) in the same directory as the script.
 
 4. **Run the App**:
    In the terminal, execute:
@@ -46,7 +46,8 @@ Speakr is a Python application that records audio from a microphone and transcri
 
 ### Text-to-Speech
 - Copy or highlight text that you want to hear spoken.
-- Press **Alt + Windows key** to speak the text from your clipboard.
+- Press **Alt + Windows key** to hear it (it may take a few seconds).
+- Press **Esc ** to cancel the sound playback.
 - Right-click the tray icon and select **TTS Voice** to choose from available voices (alloy, ash, ballad, coral, echo, fable, onyx, nova, sage, shimmer, verse).
 
 ## Building an Executable
