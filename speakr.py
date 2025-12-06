@@ -881,26 +881,26 @@ def main() -> None:
                     except ValueError:
                         return False
                 
-                # Check for TTS hotkey (Alt + Win) - must check before recording hotkey
-                # Windows key must be pressed AFTER Alt
+                # Check for TTS hotkey (Ctrl + Win) - must check before recording hotkey
+                # Windows key must be pressed AFTER Ctrl
                 if (tts_hotkey_combo.issubset(pressed_keys) and 
                     not tts_combo_activated and 
                     not combo_activated and
-                    is_windows_key_second(keyboard.Key.alt)):
-                    # Don't activate TTS if Ctrl is also pressed (to avoid conflict with Ctrl+Win)
-                    if keyboard.Key.ctrl not in pressed_keys:
+                    is_windows_key_second(keyboard.Key.ctrl)):
+                    # Don't activate TTS if Alt is also pressed (to avoid conflict with Alt+Win)
+                    if keyboard.Key.alt not in pressed_keys:
                         tts_combo_activated = True
                         # No start sound for TTS - only play send sound on release
                         print("TTS hotkey activated - will speak clipboard text on release...")
                         return
                 
-                # Check for recording hotkey (Ctrl + Win)
-                # Windows key must be pressed AFTER Ctrl
+                # Check for recording hotkey (Alt + Win)
+                # Windows key must be pressed AFTER Alt
                 if (hotkey_combo.issubset(pressed_keys) and 
                     not recorder.recording and 
                     not combo_activated and 
                     not tts_combo_activated and
-                    is_windows_key_second(keyboard.Key.ctrl)):
+                    is_windows_key_second(keyboard.Key.alt)):
                     combo_activated = True
                     safe_execute(play_click, "Playing start sound", "start")
                     print("Recording started... (release to transcribe)")
@@ -929,14 +929,14 @@ def main() -> None:
                 normalized_key = keyboard.Key.alt
             
             with state_lock:
-                # Check if we were in a TTS session (Alt + Win combo was activated)
+                # Check if we were in a TTS session (Ctrl + Win combo was activated)
                 was_tts_combo_active = tts_combo_activated
                 # Check if we were in a recording session (combo was activated)
                 was_combo_active = combo_activated
                 is_combo_key = normalized_key in hotkey_combo
                 is_tts_combo_key = normalized_key in tts_hotkey_combo
             
-            # Handle TTS hotkey release (Alt + Win)
+            # Handle TTS hotkey release (Ctrl + Win)
             if is_tts_combo_key and was_tts_combo_active:
                 safe_execute(play_click, "Playing send sound", "send")
                 print("TTS hotkey released - speaking clipboard text...")
@@ -957,7 +957,7 @@ def main() -> None:
                     tts_combo_activated = False
                 return
             
-            # Handle recording hotkey release (Ctrl + Win)
+            # Handle recording hotkey release (Alt + Win)
             if is_combo_key and was_combo_active:
                 recorder.stop()
                 duration: float = time.time() - record_start_time
