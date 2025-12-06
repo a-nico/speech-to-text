@@ -19,7 +19,7 @@ import traceback
 
 __version__ = "1.3.0"
 
-# Record hotkey: Ctrl + Windows key
+# Record hotkey: Alt + Windows key
 CTRL_KEYS = {keyboard.Key.ctrl_l}
 WIN_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
 ALT_KEYS = {keyboard.Key.alt_l}
@@ -810,8 +810,8 @@ def main() -> None:
     # Track the order of key presses to enforce correct sequence
     # Windows key must be pressed SECOND (after Ctrl or Alt)
     key_press_order: List[keyboard.Key] = []
-    hotkey_combo = {keyboard.Key.ctrl, keyboard.Key.cmd}  # Ctrl + Win for speech-to-text
-    tts_hotkey_combo = {keyboard.Key.alt, keyboard.Key.cmd}  # Alt + Win for text-to-speech
+    hotkey_combo = {keyboard.Key.alt, keyboard.Key.cmd}  # Alt + Win for speech-to-text
+    tts_hotkey_combo = {keyboard.Key.ctrl, keyboard.Key.cmd}  # Ctrl + Win for text-to-speech
     combo_activated = False
     tts_combo_activated = False
     record_start_time = 0.0
