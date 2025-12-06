@@ -971,6 +971,7 @@ def main() -> None:
                     print("Recording had an error, skipping transcription.")
                     with state_lock:
                         pressed_keys.clear()
+                        key_press_order.clear()
                         combo_activated = False
                     return
 
@@ -1002,11 +1003,11 @@ def main() -> None:
                     key_press_order.clear()
                     combo_activated = False
             
-            elif normalized_key in (keyboard.Key.ctrl, keyboard.Key.cmd, keyboard.Key.alt):
+            elif normalized_key in (keyboard.Key.ctrl, keyboard.Key.cmd, keyboard.Key.alt, B_KEY):
                 with state_lock:
                     pressed_keys.discard(normalized_key)
-                    # Remove from order list as well
-                    if normalized_key in key_press_order:
+                    # Remove all occurrences in case stale order remained
+                    while normalized_key in key_press_order:
                         key_press_order.remove(normalized_key)
                 
         except Exception as e:
