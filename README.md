@@ -39,8 +39,8 @@ Speakr is a Python application that records audio from a microphone and transcri
 
 ### Speech-to-Text
 - The application runs in the system tray.
-- Press **Alt + Windows key** to start recording.
-- Release or press **Alt + Windows key** again to stop recording and transcribe the audio.
+- Press **Alt + B** to start recording.
+- Release or press **Alt + B** again to stop recording and transcribe the audio.
 - Press **Esc** during recording to cancel.
 - Right-click the tray icon to select a microphone or exit the application.
 

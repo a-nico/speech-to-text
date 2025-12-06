@@ -19,10 +19,11 @@ import traceback
 
 __version__ = "1.3.0"
 
-# Record hotkey: Alt + Windows key
+# Record hotkey: Alt + B
 CTRL_KEYS = {keyboard.Key.ctrl_l}
 WIN_KEYS = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
 ALT_KEYS = {keyboard.Key.alt_l}
+B_KEY = keyboard.KeyCode.from_char('b')
 
 RECORD_SECONDS = 60  # Max recording duration in seconds
 SAMPLE_RATE = 16000  # Default audio sample rate, will be adjusted if unsupported
@@ -810,7 +811,7 @@ def main() -> None:
     # Track the order of key presses to enforce correct sequence
     # Windows key must be pressed SECOND (after Ctrl or Alt)
     key_press_order: List[keyboard.Key] = []
-    hotkey_combo = {keyboard.Key.alt, keyboard.Key.cmd}  # Alt + Win for speech-to-text
+    hotkey_combo = {keyboard.Key.alt, B_KEY}  # Alt + B for speech-to-text
     tts_hotkey_combo = {keyboard.Key.ctrl, keyboard.Key.cmd}  # Ctrl + Win for text-to-speech
     combo_activated = False
     tts_combo_activated = False
@@ -859,25 +860,26 @@ def main() -> None:
                 normalized_key = keyboard.Key.cmd
             elif key in ALT_KEYS:
                 normalized_key = keyboard.Key.alt
+            elif hasattr(key, 'char') and key.char == 'b':
+                normalized_key = B_KEY
 
             with state_lock:
-                if normalized_key in (keyboard.Key.ctrl, keyboard.Key.cmd, keyboard.Key.alt):
+                if normalized_key in (keyboard.Key.ctrl, keyboard.Key.cmd, keyboard.Key.alt, B_KEY):
                     # Only add to order if not already pressed (avoid key repeat)
                     if normalized_key not in pressed_keys:
                         pressed_keys.add(normalized_key)
                         key_press_order.append(normalized_key)
                 
-                # Helper function to check if Windows key was pressed second
-                def is_windows_key_second(required_first_key: keyboard.Key) -> bool:
-                    """Check if the key order is: required_first_key, then Windows key."""
+                # Helper function to check key order
+                def is_second_key(first_key, second_key) -> bool:
+                    """Check if the key order is: first_key, then second_key."""
                     if len(key_press_order) < 2:
                         return False
                     # Find positions of the keys in the press order
                     try:
-                        first_key_pos = key_press_order.index(required_first_key)
-                        win_key_pos = key_press_order.index(keyboard.Key.cmd)
-                        # Windows key must come after the first key
-                        return win_key_pos > first_key_pos
+                        first_pos = key_press_order.index(first_key)
+                        second_pos = key_press_order.index(second_key)
+                        return second_pos > first_pos
                     except ValueError:
                         return False
                 
@@ -886,21 +888,21 @@ def main() -> None:
                 if (tts_hotkey_combo.issubset(pressed_keys) and 
                     not tts_combo_activated and 
                     not combo_activated and
-                    is_windows_key_second(keyboard.Key.ctrl)):
-                    # Don't activate TTS if Alt is also pressed (to avoid conflict with Alt+Win)
+                    is_second_key(keyboard.Key.ctrl, keyboard.Key.cmd)):
+                    # Don't activate TTS if Alt is also pressed (to avoid conflict with Alt+B)
                     if keyboard.Key.alt not in pressed_keys:
                         tts_combo_activated = True
                         # No start sound for TTS - only play send sound on release
                         print("TTS hotkey activated - will speak clipboard text on release...")
                         return
                 
-                # Check for recording hotkey (Alt + Win)
-                # Windows key must be pressed AFTER Alt
+                # Check for recording hotkey (Alt + B)
+                # B key must be pressed AFTER Alt
                 if (hotkey_combo.issubset(pressed_keys) and 
                     not recorder.recording and 
                     not combo_activated and 
                     not tts_combo_activated and
-                    is_windows_key_second(keyboard.Key.alt)):
+                    is_second_key(keyboard.Key.alt, B_KEY)):
                     combo_activated = True
                     safe_execute(play_click, "Playing start sound", "start")
                     print("Recording started... (release to transcribe)")
@@ -927,6 +929,8 @@ def main() -> None:
                 normalized_key = keyboard.Key.cmd
             elif key in ALT_KEYS:
                 normalized_key = keyboard.Key.alt
+            elif hasattr(key, 'char') and key.char == 'b':
+                normalized_key = B_KEY
             
             with state_lock:
                 # Check if we were in a TTS session (Ctrl + Win combo was activated)
@@ -957,7 +961,7 @@ def main() -> None:
                     tts_combo_activated = False
                 return
             
-            # Handle recording hotkey release (Alt + Win)
+            # Handle recording hotkey release (Alt + B)
             if is_combo_key and was_combo_active:
                 recorder.stop()
                 duration: float = time.time() - record_start_time
